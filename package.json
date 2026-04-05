@@ -3,5 +3,10 @@
     "@huggingface/hub": "^2.11.0",
     "fft.js": "^4.0.4",
     "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "bun-types": "^1.0.0"
   }
 }

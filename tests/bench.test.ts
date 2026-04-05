@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
-import ImageClassifier from '../main.js';
-import path from 'path'
+import ImageClassifier from '../main';
+import path from 'path';
 
 test('ImageClassifier: loads images from directories', async () => {
   const classifier = new ImageClassifier();
