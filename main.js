@@ -12,25 +12,19 @@ class ImageClassifier {
   }
 
   async loadImages() {
-    const realDir = './reals';
-    const fakeDir = './fakes';
+    const imagesDir = './images';
 
-    if (!fs.existsSync(realDir) || !fs.existsSync(fakeDir)) {
-      throw new Error('Image directories do not exist');
+    if (!fs.existsSync(imagesDir)) {
+      throw new Error('Image directory does not exist');
     }
 
-    const getImageFiles = (dir) => {
-      return fs.readdirSync(dir).filter(file => {
-        const ext = path.extname(file).toLowerCase();
-        return ['.jpg', '.jpeg', '.png', '.webp'].includes(ext);
-      });
-    };
+    const files = fs.readdirSync(imagesDir).filter(file => {
+      const ext = path.extname(file).toLowerCase();
+      return ['.jpg', '.jpeg', '.png', '.webp'].includes(ext);
+    });
 
-    const realFiles = getImageFiles(realDir);
-    const fakeFiles = getImageFiles(fakeDir);
-
-    this.realImages = realFiles.map(file => path.join(realDir, file));
-    this.fakeImages = fakeFiles.map(file => path.join(fakeDir, file));
+    this.realImages = files.filter(file => file.startsWith('real_')).map(file => path.join(imagesDir, file));
+    this.fakeImages = files.filter(file => file.startsWith('fake_')).map(file => path.join(imagesDir, file));
 
     console.log(`Loaded ${this.realImages.length} real images and ${this.fakeImages.length} fake images`);
   }

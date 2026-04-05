@@ -52,7 +52,7 @@ test('ImageClassifier: all files are PNG format', async () => {
   }
 });
 
-test('ImageClassifier: naming convention is img_XX.png', async () => {
+test('ImageClassifier: naming convention is real_XX.png or fake_XX.png', async () => {
   const classifier = new ImageClassifier();
   await classifier.loadImages();
 
@@ -60,6 +60,6 @@ test('ImageClassifier: naming convention is img_XX.png', async () => {
   
   for (const imagePath of allImages) {
     const filename = path.basename(imagePath);
-    expect(filename).toMatch(/^img_\d{2}\.png$/);
+    expect(filename).toMatch(/^(real|fake)_img_\d{2}\.png$/);
   }
 });
