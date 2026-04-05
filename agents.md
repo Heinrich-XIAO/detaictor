@@ -1,0 +1,1 @@
+- Never create or modify .md files unless explicitly requested.
