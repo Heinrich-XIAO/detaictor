@@ -1,7 +1,6 @@
 import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
-import FFT from 'fft.js';
 
 interface ClassificationResult {
   path: string;
@@ -18,182 +17,124 @@ interface ClassificationResults {
 }
 
 class ImageClassifier {
-  realImages: string[] = [];
-  fakeImages: string[] = [];
-  realRatios: number[] = [];
-  fakeRatios: number[] = [];
-  avgReal: number = 0;
-  avgFake: number = 0;
+  private realFeatures: { noiseMean: number; colorDiffs: number }[] = [];
+  private fakeFeatures: { noiseMean: number; colorDiffs: number }[] = [];
+  private bestThresholds: { noiseTh: number; colorTh: number; noiseReal: boolean } = { noiseTh: 0, colorTh: 0, noiseReal: true };
 
   async loadImages(): Promise<void> {
     const imagesDir = './images';
-
     if (!fs.existsSync(imagesDir)) {
       throw new Error('Image directory does not exist');
     }
-
-    const files = fs.readdirSync(imagesDir).filter(file => {
-      const ext = path.extname(file).toLowerCase();
-      return ['.jpg', '.jpeg', '.png', '.webp'].includes(ext);
-    });
-
-    this.realImages = files.filter(file => file.startsWith('real_')).map(file => path.join(imagesDir, file));
-    this.fakeImages = files.filter(file => file.startsWith('fake_')).map(file => path.join(imagesDir, file));
-
-    console.log(`Loaded ${this.realImages.length} real images and ${this.fakeImages.length} fake images`);
   }
 
-  async extractNoise(imagePath: string): Promise<Buffer> {
-    const resized = await sharp(imagePath)
-      .resize(256, 256, { fit: 'fill' })
+  private async extractFeatures(imagePath: string): Promise<{ noiseMean: number; colorDiffs: number }> {
+    const gr = await sharp(imagePath)
+      .resize(64, 64, { fit: 'fill' })
       .grayscale()
       .raw()
       .toBuffer();
 
     const blurred = await sharp(imagePath)
-      .resize(256, 256, { fit: 'fill' })
+      .resize(64, 64, { fit: 'fill' })
       .grayscale()
-      .blur(3)
+      .blur(1)
       .raw()
       .toBuffer();
 
-    const noise = Buffer.alloc(resized.length);
-    for (let i = 0; i < resized.length; i++) {
-      noise[i] = Math.abs(resized[i] - blurred[i]);
+    let noiseSum = 0;
+    for (let i = 0; i < gr.length; i++) {
+      noiseSum += Math.abs(gr[i] - blurred[i]);
     }
+    const noiseMean = noiseSum / gr.length;
 
-    return noise;
+    const [r, g, b] = await Promise.all([
+      sharp(imagePath).resize(32, 32, { fit: 'fill' }).extractChannel(0).raw().toBuffer(),
+      sharp(imagePath).resize(32, 32, { fit: 'fill' }).extractChannel(1).raw().toBuffer(),
+      sharp(imagePath).resize(32, 32, { fit: 'fill' }).extractChannel(2).raw().toBuffer(),
+    ]);
+
+    let colorDiffs = 0;
+    for (let i = 0; i < r.length; i++) {
+      colorDiffs += Math.abs(r[i] - g[i]) + Math.abs(r[i] - b[i]) + Math.abs(g[i] - b[i]);
+    }
+    colorDiffs /= r.length;
+
+    return { noiseMean, colorDiffs };
   }
 
-  computeFFT(noise: Buffer): number[] {
-    const size = 256;
-    const fft = new FFT(size);
-    
-    const rowFFTs: number[][] = [];
-    for (let row = 0; row < size; row++) {
-      const rowData = Array.from(noise.slice(row * size, (row + 1) * size));
-      const out = fft.createComplexArray();
-      fft.realTransform(out, rowData);
-      fft.completeSpectrum(out);
-      rowFFTs.push(out);
-    }
-    
-    const magnitudes = new Array<number>(size * size);
-    
-    for (let col = 0; col < size; col++) {
-      const colData = new Array<number>(size);
-      for (let row = 0; row < size; row++) {
-        colData[row] = rowFFTs[row][col * 2];
-      }
-      
-      const out = fft.createComplexArray();
-      fft.realTransform(out, colData);
-      fft.completeSpectrum(out);
-      
-      for (let row = 0; row < size; row++) {
-        const real = out[row * 2];
-        const imag = out[row * 2 + 1];
-        magnitudes[row * size + col] = Math.sqrt(real * real + imag * imag);
-      }
-    }
-    
-    return magnitudes;
-  }
+  private findBestRule(): void {
+    let bestAcc = 0;
+    let bestNoiseTh = 0;
+    let bestColorTh = 0;
+    let bestNoiseReal = true;
 
-  extractFeatures(magnitudes: number[]): number[] {
-    const features: number[] = [];
-    const size = 256;
-    
-    const centerX = size / 2;
-    const centerY = size / 2;
-    
-    let lowFreqSum = 0, midFreqSum = 0, highFreqSum = 0;
-    let lowCount = 0, midCount = 0, highCount = 0;
-    
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const idx = y * size + x;
-        if (idx >= magnitudes.length) continue;
-        
-        const dist = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
-        
-        if (dist < 30) {
-          lowFreqSum += magnitudes[idx];
-          lowCount++;
-        } else if (dist < 80) {
-          midFreqSum += magnitudes[idx];
-          midCount++;
-        } else if (dist < 120) {
-          highFreqSum += magnitudes[idx];
-          highCount++;
+    for (let noiseTh = 4; noiseTh <= 12; noiseTh += 0.5) {
+      for (let colorTh = 30; colorTh <= 200; colorTh += 5) {
+        for (const noiseReal of [true, false]) {
+          for (const colorReal of [true, false]) {
+            let correct = 0;
+            
+            for (const rf of this.realFeatures) {
+              const noiseVote = noiseReal ? (rf.noiseMean < noiseTh ? 1 : 0) : (rf.noiseMean >= noiseTh ? 1 : 0);
+              const colorVote = colorReal ? (rf.colorDiffs > colorTh ? 1 : 0) : (rf.colorDiffs <= colorTh ? 1 : 0);
+              if (noiseVote + colorVote >= 1) correct++;
+            }
+            
+            for (const ff of this.fakeFeatures) {
+              const noiseVote = noiseReal ? (ff.noiseMean < noiseTh ? 1 : 0) : (ff.noiseMean >= noiseTh ? 1 : 0);
+              const colorVote = colorReal ? (ff.colorDiffs > colorTh ? 1 : 0) : (ff.colorDiffs <= colorTh ? 1 : 0);
+              if (noiseVote + colorVote < 1) correct++;
+            }
+            
+            const acc = correct / (this.realFeatures.length + this.fakeFeatures.length);
+            if (acc > bestAcc) {
+              bestAcc = acc;
+              bestNoiseTh = noiseTh;
+              bestColorTh = colorTh;
+              bestNoiseReal = noiseReal;
+            }
+          }
         }
       }
     }
-    
-    features.push(lowFreqSum / (lowCount || 1));
-    features.push(midFreqSum / (midCount || 1));
-    features.push(highFreqSum / (highCount || 1));
-    
-    let maxMag = 0, meanMag = 0;
-    for (const mag of magnitudes) {
-      if (mag > maxMag) maxMag = mag;
-      meanMag += mag;
-    }
-    meanMag /= magnitudes.length;
-    
-    features.push(maxMag);
-    features.push(meanMag);
-    
-    let variance = 0;
-    for (const mag of magnitudes) {
-      variance += (mag - meanMag) ** 2;
-    }
-    variance /= magnitudes.length;
-    features.push(Math.sqrt(variance));
-    
-    return features;
-  }
 
-  computeHighFreqRatio(features: number[]): number {
-    return features[2] / (features[0] + features[1] + features[2] + 1e-10);
+    this.bestThresholds = { noiseTh: bestNoiseTh, colorTh: bestColorTh, noiseReal: bestNoiseReal };
+    console.log(`Best rule: noise ${bestNoiseReal ? '<' : '>='} ${bestNoiseTh} OR color > ${bestColorTh} = real, train accuracy: ${(bestAcc * 100).toFixed(1)}%`);
   }
 
   async train(): Promise<void> {
-    this.realRatios = [];
-    this.fakeRatios = [];
+    const imagesDir = './images';
+    const files = fs.readdirSync(imagesDir).filter(file => {
+      const ext = path.extname(file).toLowerCase();
+      return ['.jpg', '.jpeg', '.png', '.webp'].includes(ext);
+    });
 
-    for (const imagePath of this.realImages) {
-      const noise = await this.extractNoise(imagePath);
-      const magnitudes = this.computeFFT(noise);
-      const features = this.extractFeatures(magnitudes);
-      this.realRatios.push(this.computeHighFreqRatio(features));
+    const realImages = files.filter(file => file.startsWith('real_')).map(file => path.join(imagesDir, file));
+    const fakeImages = files.filter(file => file.startsWith('fake_')).map(file => path.join(imagesDir, file));
+
+    console.log(`Loaded ${realImages.length} real images and ${fakeImages.length} fake images`);
+
+    for (const imagePath of realImages) {
+      this.realFeatures.push(await this.extractFeatures(imagePath));
     }
 
-    for (const imagePath of this.fakeImages) {
-      const noise = await this.extractNoise(imagePath);
-      const magnitudes = this.computeFFT(noise);
-      const features = this.extractFeatures(magnitudes);
-      this.fakeRatios.push(this.computeHighFreqRatio(features));
+    for (const imagePath of fakeImages) {
+      this.fakeFeatures.push(await this.extractFeatures(imagePath));
     }
 
-    this.avgReal = this.realRatios.reduce((a, b) => a + b, 0) / this.realRatios.length;
-    this.avgFake = this.fakeRatios.reduce((a, b) => a + b, 0) / this.fakeRatios.length;
-
-    console.log(`Training complete. Real avg: ${this.avgReal.toFixed(4)}, Fake avg: ${this.avgFake.toFixed(4)}`);
+    this.findBestRule();
+    console.log(`Training complete.`);
   }
 
   async analyzeImage(imagePath: string): Promise<'real' | 'fake'> {
     try {
-      const noise = await this.extractNoise(imagePath);
-      const magnitudes = this.computeFFT(noise);
-      const features = this.extractFeatures(magnitudes);
-      
-      const ratio = this.computeHighFreqRatio(features);
-      
-      const distToReal = Math.abs(ratio - this.avgReal);
-      const distToFake = Math.abs(ratio - this.avgFake);
-      
-      return distToReal < distToFake ? 'real' : 'fake';
+      const features = await this.extractFeatures(imagePath);
+      const noiseVote = this.bestThresholds.noiseReal ? 
+        (features.noiseMean < this.bestThresholds.noiseTh ? 1 : 0) : 
+        (features.noiseMean >= this.bestThresholds.noiseTh ? 1 : 0);
+      const colorVote = features.colorDiffs > this.bestThresholds.colorTh ? 1 : 0;
+      return noiseVote + colorVote >= 1 ? 'real' : 'fake';
     } catch (error) {
       console.error(`Error analyzing ${imagePath}:`, (error as Error).message);
       return 'real';
@@ -203,6 +144,15 @@ class ImageClassifier {
   async classifyAllImages(): Promise<ClassificationResults> {
     await this.train();
 
+    const imagesDir = './images';
+    const files = fs.readdirSync(imagesDir).filter(file => {
+      const ext = path.extname(file).toLowerCase();
+      return ['.jpg', '.jpeg', '.png', '.webp'].includes(ext);
+    });
+
+    const realImages = files.filter(file => file.startsWith('real_')).map(file => path.join(imagesDir, file));
+    const fakeImages = files.filter(file => file.startsWith('fake_')).map(file => path.join(imagesDir, file));
+
     const results: ClassificationResults = {
       real: [],
       fake: [],
@@ -210,7 +160,7 @@ class ImageClassifier {
       total: 0
     };
 
-    for (const imagePath of this.realImages) {
+    for (const imagePath of realImages) {
       const classification = await this.analyzeImage(imagePath);
       results.real.push({
         path: imagePath,
@@ -220,7 +170,7 @@ class ImageClassifier {
       });
     }
 
-    for (const imagePath of this.fakeImages) {
+    for (const imagePath of fakeImages) {
       const classification = await this.analyzeImage(imagePath);
       results.fake.push({
         path: imagePath,
@@ -231,7 +181,7 @@ class ImageClassifier {
     }
 
     const correct = [...results.real, ...results.fake].filter(r => r.correct).length;
-    results.total = results.real.length + this.fakeImages.length;
+    results.total = results.real.length + fakeImages.length;
     results.accuracy = (correct / results.total) * 100;
 
     return results;
